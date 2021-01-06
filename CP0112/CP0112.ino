@@ -29,7 +29,26 @@ Release history
 Version Date      Author    Comment
 1.0d1   27/12/20  Phildem   First blood
 1.0     28/12/20  Phildem   Display complete
+1.1     30/12/20  Phildem   Interupt delay optim
 */
+
+//OptimIO ......................................................................................................
+#define CmpOpt_FastIO
+#ifdef CmpOpt_FastIO
+  #define setPin(b) ( (b)<8 ? PORTD |=(1<<(b)) : PORTB |=(1<<(b-8)) )
+  #define clrPin(b) ( (b)<8 ? PORTD &=~(1<<(b)) : PORTB &=~(1<<(b-8)) )
+  #define tstPin(b) ( (b)<8 ? (PORTD &(1<<(b)))!=0 : (PORTB &(1<<(b-8)))!=0 )
+  
+  #define FastDigW(b,How) if (How) setPin(b); else clrPin(b)
+  
+#endif
+
+//debugTime ......................................................................................................
+#define CmpOpt_DebugTim
+
+#ifdef CmpOpt_DebugTim
+  #define   kDebugOutSetV     A0
+#endif
 
 //IO Abstraction ...............................................................................................
 
@@ -115,9 +134,13 @@ class DispMux {
     pinMode(kDispOutSegG, OUTPUT); 
     pinMode(kDispOutSegDP, OUTPUT);
 
+    #ifdef CmpOpt_DebugTim
+      pinMode(kDebugOutSetV, OUTPUT);
+    #endif
+
     // Init members
     m_CurDisp=3;      // To start a new cycle
-    m_Display=0;      // Display 0 after init
+    m_Display=1;      // Insure non 0 value
     m_Dp=3;           // Dp on digit 3
 
     // Init Timer 2
@@ -126,68 +149,110 @@ class DispMux {
     TIMSK2 = 0b00000001;  // TOIE2
         
     sei(); // idem interrupts();  Interupts are allowed
+    Display(0); // Set to 0
   };
 
   //==========================================================================================
   //Method to set the value to display 
   void Display(int Value){
+    
+      if (Value==m_Display)   // Optim if value unchanged
+        return;
+
+#ifdef CmpOpt_DebugTim
+      digitalWrite(kDebugOutSetV, HIGH);    
+#endif
+
       m_Display=Value;
+
+      int  DBuff=m_Display;   // Update current value to display     
+   
+      int  Div=1000;          // Digit decade divider
+      byte Rbi=m_Dp;          // First non blanked digit 
+      byte DigVal;            // Digit loop calculation
+      
+      for (byte Digit=0;Digit<4;Digit++){
+        
+        if (DBuff>kDispMaxVal)      // Display Overflow if needed
+          DigVal=kDispSegOver;
+        else if (DBuff<kDispMinVal) // Display Underflow if needed
+         DigVal=kDispSegUnder;
+        else{
+          // Calculate digit value
+    
+          if (DBuff<0){              // Handle negativ value and display the sign
+            DigVal=kDispSegMinus;
+            DBuff=-DBuff;
+          } 
+          else{
+            DigVal=DBuff/Div;
+            DBuff-=(DigVal*Div);
+            
+            if (Rbi>Digit){     // Handle ripple blanking for hid trailing zero
+              if (DigVal==0)
+                DigVal=kDispSegBlank;
+              else
+                Rbi=Digit;
+            }
+          }
+          Div=Div/10;
+        }  
+        m_SegCache[Digit]=DigVal;
+      }
+      
+#ifdef CmpOpt_DebugTim
+      digitalWrite(kDebugOutSetV, LOW);    
+#endif
+      
    }
 
   //==========================================================================================
   //Method to set the decimal point
   void SetDp(byte Dp){
       m_Dp=Dp;
+      int Tmp=m_Display;    // This code to force trailing zero display refresh
+      m_Display++;
+      Display(Tmp);
    } 
 
   //==========================================================================================
   //Method to call during Timer2 interupt
   void Interupt(){
 
+#ifdef CmpOpt_FastIO
+    // Switch off current Digit
+    clrPin(KDispDigit[m_CurDisp]);
+
+    m_CurDisp++;
+    if (m_CurDisp>3)
+      m_CurDisp=0;
+    
+    byte Segs=KDispSeg[m_SegCache[m_CurDisp]];
+
+    // Output segments
+    FastDigW(kDispOutSegA,Segs & 0x1);
+    FastDigW(kDispOutSegB,Segs & 0x2);
+    FastDigW(kDispOutSegC,Segs & 0x4);
+    FastDigW(kDispOutSegD,Segs & 0x8);
+    FastDigW(kDispOutSegE,Segs & 0x10);
+    FastDigW(kDispOutSegF,Segs & 0x20);
+    FastDigW(kDispOutSegG,Segs & 0x40);
+
+    // Handle Decimal point
+    FastDigW(kDispOutSegDP,m_CurDisp==m_Dp);
+
+    // Light up the current digit 
+    setPin(KDispDigit[m_CurDisp]);
+
+#else
     // Switch off current Digit
     digitalWrite(KDispDigit[m_CurDisp], LOW);
-    
-    // Segment calculation is used as anti-ghost effect delay
 
-    // Calculate Current digit
     m_CurDisp++;
-    if (m_CurDisp>3){
+    if (m_CurDisp>3)
       m_CurDisp=0;
-      m_DBuff=m_Display;
-      m_Div=1000;
-      m_Rbi=m_Dp;
-    }
-
-    int DigVal;                   // Contains the value to display on the current digit
-
-    if (m_DBuff>kDispMaxVal)      // Display Overflow if needed
-      DigVal=kDispSegOver;
-    else if (m_DBuff<kDispMinVal) // Display Underflow if needed
-     DigVal=kDispSegUnder;
-    else{
-      // Calculate digit value
-
-      if (m_DBuff<0){              // Handle negativ value and disply teh sign
-        DigVal=kDispSegMinus;
-        m_DBuff=-m_DBuff;
-      } 
-      else{
-        DigVal=m_DBuff/m_Div;
-        m_DBuff-=(DigVal*m_Div);
-        
-        if (m_Rbi>m_CurDisp){     // Handle ripple blanking for hid trailing zero
-          if (DigVal==0)
-            DigVal=kDispSegBlank;
-          else
-            m_Rbi=m_CurDisp;
-        }
-        
-      }
-      m_Div=m_Div/10;
-    }
-
-    // Convert to segments
-    byte Segs=KDispSeg[DigVal];
+    
+    byte Segs=KDispSeg[m_SegCache[m_CurDisp]];
 
     // Output segments 
     digitalWrite(kDispOutSegA,Segs & 0x1);
@@ -204,6 +269,8 @@ class DispMux {
     // Light up the current digit 
     digitalWrite(KDispDigit[m_CurDisp], HIGH);
 
+#endif
+    
     // Reload timer
     TCNT2 = 256-250; // --> 250x16us = 4ms
    } 
@@ -213,11 +280,9 @@ class DispMux {
   //++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
   // Members
   volatile int  m_Display;      // Current displayed value
-  volatile int  m_DBuff;        // Display Buffer
-  volatile byte m_CurDisp;      // Current Displayed Digit 0->3
-  volatile int  m_Div ;         // Digit decade divider
-  volatile byte m_Rbi;          // First non blanked digit
   volatile byte m_Dp;           // Digit of decimal point 0->3
+  byte          m_CurDisp;      // Current displayed digit
+  byte          m_SegCache[4];  // Segment cache
 };
 
 //Global Var ...............................................................................................
@@ -246,9 +311,9 @@ void setup() {
   gMux.Init();
 
   gMux.Display(8888); // test Display
-  delay(1000);
+  delay(2000);
   gMux.Display(0);
-  delay(500);
+  delay(1000);
 }
 
 //============================================================================================================
@@ -263,19 +328,19 @@ void loop() {
   // Display some tests
 
   gMux.Display(10000);
-  delay(500);
+  delay(2000);
   gMux.Display(-1000);
-  delay(500);
+  delay(2000);
 
   gMux.Display(0);
   gMux.SetDp(2);
-  delay(500);
+  delay(2000);
 
   gMux.SetDp(1);
-  delay(500);
+  delay(2000);
 
   gMux.SetDp(0);
-  delay(500);
+  delay(2000);
 
   gMux.SetDp(2);
   
